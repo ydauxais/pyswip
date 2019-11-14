@@ -934,6 +934,11 @@ PL_cleanup = _lib.PL_cleanup
 PL_cleanup.restype = c_int
 
 PL_unify_integer = _lib.PL_unify_integer
+
+PL_unify_float = _lib.PL_unify_float
+PL_unify_float.argtypes = [term_t, c_double]
+PL_unify_float.restype = c_int
+
 PL_unify = _lib.PL_unify
 PL_unify.restype = c_int
 
