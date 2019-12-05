@@ -1180,7 +1180,6 @@ intptr_t = c_long
 ssize_t = intptr_t
 wint_t = c_uint
 
-
 #typedef struct
 #{
 #  int __count;
