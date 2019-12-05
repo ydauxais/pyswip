@@ -52,8 +52,6 @@ def create_temporary_copy(path):
 
 
 class SWIPl:
-    cdll = 0
-
     def __init__(self):
         # Find the path and resource file. SWI_HOME_DIR shall be treated as a constant
         # by users of this module
@@ -62,7 +60,6 @@ class SWIPl:
 
         temp, temp_path = create_temporary_copy(self._path)
         # Load the library
-        SWIPl.cdll += 1
         self._lib = CDLL(temp_path)
         temp.close()
 
