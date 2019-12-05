@@ -43,23 +43,25 @@ class ArgumentTypeError(Exception):
 
 
 class Atom(object):
-    __slots__ = "handle", "chars"
+    __slots__ = "handle", "swipl", "chars"
 
-    def __init__(self, handleOrChars):
+    def __init__(self, handleOrChars, swipl):
         """Create an atom.
         ``handleOrChars``: handle or string of the atom.
         """
 
+        self.swipl = swipl
+
         if isinstance(handleOrChars, str):
-            self.handle = PL_new_atom(handleOrChars)
+            self.handle = self.swipl.PL_new_atom(handleOrChars)
             self.chars = handleOrChars
         else:
             self.handle = handleOrChars
-            PL_register_atom(self.handle)
+            self.swipl.PL_register_atom(self.handle)
             #self.chars = c_char_p(PL_atom_chars(self.handle)).value
-            self.chars = PL_atom_chars(self.handle)
+            self.chars = self.swipl.PL_atom_chars(self.handle)
 
-    def fromTerm(cls, term):
+    def fromTerm(cls, term, swipl):
         """Create an atom from a Term or term handle."""
 
         if isinstance(term, Term):
@@ -68,13 +70,13 @@ class Atom(object):
             raise ArgumentTypeError((str(Term), str(c_void_p)), str(type(term)))
 
         a = atom_t()
-        if PL_get_atom(term, byref(a)):
-            return cls(a.value)
+        if swipl.PL_get_atom(term, byref(a)):
+            return cls(a.value, swipl)
     fromTerm = classmethod(fromTerm)
 
     def __del__(self):
         if not cleaned:
-            PL_unregister_atom(self.handle)
+            self.swipl.PL_unregister_atom(self.handle)
 
     def get_value(self):
         ret = self.chars
@@ -104,19 +106,20 @@ class Atom(object):
 
 
 class Term(object):
-    __slots__ = "handle", "chars", "__value", "a0"
+    __slots__ = "handle", "swipl",  "chars", "__value", "a0"
 
-    def __init__(self, handle=None, a0=None):
+    def __init__(self, swipl, handle=None, a0=None):
+        self.swipl = swipl
         if handle:
             #self.handle = PL_copy_term_ref(handle)
             self.handle = handle
         else:
-            self.handle = PL_new_term_ref()
+            self.handle = self.swipl.PL_new_term_ref()
         self.chars = None
         self.a0 = a0
 
     def __invert__(self):
-        return _not(self)
+        return Functor("not", self.swipl, 1)
 
     def get_value(self):
         pass
@@ -125,16 +128,17 @@ class Term(object):
         if type(self) != type(other):
             return False
         else:
-            return PL_compare(self.handle, other.handle) == 0
+            return self.swipl.PL_compare(self.handle, other.handle) == 0
 
     def __hash__(self):
         return self.handle
 
 
 class Variable(object):
-    __slots__ = "handle", "chars"
+    __slots__ = "handle", "swipl", "chars"
 
-    def __init__(self, handle=None, name=None):
+    def __init__(self, handle=None, swipl=None, name=None):
+        self.swipl = swipl
         self.chars = None
         if name:
             self.chars = name
@@ -142,42 +146,46 @@ class Variable(object):
             self.handle = handle
             s = create_string_buffer(b"\00"*64)  # FIXME:
             ptr = cast(s, c_char_p)
-            if PL_get_chars(handle, byref(ptr), CVT_VARIABLE|BUF_RING):
+            if self.swipl.PL_get_chars(handle, byref(ptr), CVT_VARIABLE|BUF_RING):
                 self.chars = ptr.value
         else:
-            self.handle = PL_new_term_ref()
+            self.handle = self.swipl.PL_new_term_ref()
             #PL_put_variable(self.handle)
         if (self.chars is not None) and not isinstance(self.chars, str):
             self.chars = self.chars.decode()
 
     def unify(self, value):
+        v = value
         if type(value) == str:
-            fun = PL_unify_atom_chars
+            fun = self.swipl.PL_unify_atom_chars
         elif type(value) == int:
-            fun = PL_unify_integer
+            fun = self.swipl.PL_unify_integer
         elif type(value) == bool:
-            fun = PL_unify_bool
+            fun = self.swipl.PL_unify_bool
         elif type(value) == float:
-            fun = PL_unify_float
+            fun = self.swipl.PL_unify_float
         elif type(value) == list:
-            fun = PL_unify_list
+            fun = self.swipl.PL_unify_list
+        elif type(value) == Functor:
+            fun = self.swipl.PL_unify
+            v = value(*value.args).handle
         else:
             raise
 
         if self.handle is None:
-            t = PL_new_term_ref(self.handle)
+            t = self.swipl.PL_new_term_ref(self.handle)
         else:
-            t = PL_copy_term_ref(self.handle)
-        fun(t, value)
+            t = self.swipl.PL_copy_term_ref(self.handle)
+        fun(t, v)
         self.handle = t
 
     def get_value(self):
-        return getTerm(self.handle)
+        return getTerm(self.handle, self.swipl)
 
     value = property(get_value, unify)
 
     def unified(self):
-        return PL_term_type(self.handle) == PL_VARIABLE
+        return self.swipl.PL_term_type(self.handle) == PL_VARIABLE
 
     def __str__(self):
         if self.chars is not None:
@@ -190,49 +198,54 @@ class Variable(object):
 
     def put(self, term):
         #PL_put_variable(term)
-        PL_put_term(term, self.handle)
+        self.swipl.PL_put_term(term, self.handle)
 
     def __eq__(self, other):
         if type(self) != type(other):
             return False
         else:
-            return PL_compare(self.handle, other.handle) == 0
+            return self.swipl.PL_compare(self.handle, other.handle) == 0
 
     def __hash__(self):
         return self.handle
 
 
 class Functor(object):
-    __slots__ = "handle", "name", "arity", "args", "__value", "a0"
-    func = {}
+    __slots__ = "handle", "swipl", "name", "arity", "args", "__value", "a0"
 
-    def __init__(self, handleOrName, arity=1, args=None, a0=None):
+    def __init__(self, handleOrName, swipl, arity=1, args=None, a0=None):
         """Create a functor.
         ``handleOrName``: functor handle, a string or an atom.
         """
 
+        if "unify" not in swipl.func_names:
+            swipl.func_names.add("unify")
+            swipl.unify = Functor("=", swipl, arity=2)
+            swipl.func[swipl.unify.handle] = swipl.unifier
+
+        self.swipl = swipl
         self.args = args or []
         self.arity = arity
         self.a0 = a0
 
         if isinstance(handleOrName, str):
-            self.name = Atom(handleOrName)
-            self.handle = PL_new_functor(self.name.handle, arity)
+            self.name = Atom(handleOrName, self.swipl)
+            self.handle = self.swipl.PL_new_functor(self.name.handle, arity)
             self.__value = "Functor%d" % self.handle
         elif isinstance(handleOrName, Atom):
             self.name = handleOrName
-            self.handle = PL_new_functor(self.name.handle, arity)
+            self.handle = self.swipl.PL_new_functor(self.name.handle, arity)
             self.__value = "Functor%d" % self.handle
         else:
             self.handle = handleOrName
-            self.name = Atom(PL_functor_name(self.handle))
-            self.arity = PL_functor_arity(self.handle)
+            self.name = Atom(self.swipl.PL_functor_name(self.handle), self.swipl)
+            self.arity = self.swipl.PL_functor_arity(self.handle)
             try:
-                self.__value = self.func[self.handle](self.arity, *self.args)
+                self.__value = self.swipl.func[self.handle](self.arity, *self.args)
             except KeyError:
                 self.__value = str(self)
 
-    def fromTerm(cls, term):
+    def fromTerm(cls, term, swipl):
         """Create a functor from a Term or term handle."""
 
         if isinstance(term, Term):
@@ -241,29 +254,32 @@ class Functor(object):
             raise ArgumentTypeError((str(Term), str(int)), str(type(term)))
 
         f = functor_t()
-        if PL_get_functor(term, byref(f)):
+        if swipl.PL_get_functor(term, byref(f)):
             # get args
             args = []
-            arity = PL_functor_arity(f.value)
+            arity = swipl.PL_functor_arity(f.value)
             # let's have all args be consecutive
-            a0 = PL_new_term_refs(arity)
+            a0 = swipl.PL_new_term_refs(arity)
             for i, a in enumerate(range(1, arity + 1)):
-                if PL_get_arg(a, term, a0 + i):
-                    args.append(getTerm(a0 + i))
+                if swipl.PL_get_arg(a, term, a0 + i):
+                    args.append(getTerm(a0 + i, swipl))
 
-            return cls(f.value, args=args, a0=a0)
+            return cls(f.value, swipl, args=args, a0=a0)
     fromTerm = classmethod(fromTerm)
 
     value = property(lambda s: s.__value)
 
     def __call__(self, *args):
         assert self.arity == len(args)   # FIXME: Put a decent error message
-        a = PL_new_term_refs(len(args))
+        a = self.swipl.PL_new_term_refs(len(args))
         for i, arg in enumerate(args):
-            putTerm(a + i, arg)
+            term_arg = arg
+            if type(arg) is Functor:
+                term_arg = arg(*arg.args)
+            putTerm(a + i, term_arg, self.swipl)
 
-        t = PL_new_term_ref()
-        PL_cons_functor_v(t, self.handle, a)
+        t = self.swipl.PL_new_term_ref()
+        self.swipl.PL_cons_functor_v(t, self.handle, a)
         return Term(t)
 
     def __str__(self):
@@ -281,86 +297,71 @@ class Functor(object):
         if type(self) != type(other):
             return False
         else:
-            return PL_compare(self.handle, other.handle) == 0
+            return self.swipl.PL_compare(self.handle, other.handle) == 0
 
     def __hash__(self):
         return self.handle
 
 
-def _unifier(arity, *args):
-    assert arity == 2
-    #if PL_is_variable(args[0]):
-    #    args[0].unify(args[1])
-    try:
-        return {args[0].value:args[1].value}
-    except AttributeError:
-        return {args[0].value:args[1]}
-
-_unify = Functor("=", 2)
-Functor.func[_unify.handle] = _unifier
-_not = Functor("not", 1)
-_comma = Functor(",", 2)
-
-
-def putTerm(term, value):
+def putTerm(term, value, swipl):
     if isinstance(value, Term):
-        PL_put_term(term, value.handle)
+        swipl.PL_put_term(term, value.handle)
     elif isinstance(value, str):
-        PL_put_atom_chars(term, value)
+        swipl.PL_put_atom_chars(term, value)
     elif isinstance(value, int):
-        PL_put_integer(term, value)
+        swipl.PL_put_integer(term, value)
     elif isinstance(value, Variable):
         value.put(term)
     elif isinstance(value, list):
-        putList(term, value)
+        putList(term, value, swipl)
     elif isinstance(value, Atom):
         print("ATOM")
     elif isinstance(value, Functor):
-        PL_put_functor(term, value.handle)
+        swipl.PL_put_functor(term, value.handle)
     else:
         raise Exception("Not implemented")
 
 
-def putList(l, ls):
-    PL_put_nil(l)
+def putList(l, ls, swipl):
+    swipl.PL_put_nil(l)
     for item in reversed(ls):
-        a = PL_new_term_ref()  #PL_new_term_refs(len(ls))
-        putTerm(a, item)
-        PL_cons_list(l, a, l)
+        a = swipl.PL_new_term_ref()  #PL_new_term_refs(len(ls))
+        putTerm(a, item, swipl)
+        swipl.PL_cons_list(l, a, l)
 
 
 # deprecated
-def getAtomChars(t):
+def getAtomChars(t, swipl):
     """If t is an atom, return it as a string, otherwise raise InvalidTypeError.
     """
     s = c_char_p()
-    if PL_get_atom_chars(t, byref(s)):
+    if swipl.PL_get_atom_chars(t, byref(s)):
         return s.value
     else:
         raise InvalidTypeError("atom")
 
 
-def getAtom(t):
+def getAtom(t, swipl):
     """If t is an atom, return it , otherwise raise InvalidTypeError.
     """
-    return Atom.fromTerm(t)
+    return Atom.fromTerm(t, swipl)
 
 
-def getBool(t):
+def getBool(t, swipl):
     """If t is of type bool, return it, otherwise raise InvalidTypeError.
     """
     b = c_int()
-    if PL_get_long(t, byref(b)):
+    if swipl.PL_get_long(t, byref(b)):
         return bool(b.value)
     else:
         raise InvalidTypeError("bool")
 
 
-def getLong(t):
+def getLong(t, swipl):
     """If t is of type long, return it, otherwise raise InvalidTypeError.
     """
     i = c_long()
-    if PL_get_long(t, byref(i)):
+    if swipl.PL_get_long(t, byref(i)):
         return i.value
     else:
         raise InvalidTypeError("long")
@@ -369,29 +370,29 @@ def getLong(t):
 getInteger = getLong  # just an alias for getLong
 
 
-def getFloat(t):
+def getFloat(t, swipl):
     """If t is of type float, return it, otherwise raise InvalidTypeError.
     """
     d = c_double()
-    if PL_get_float(t, byref(d)):
+    if swipl.PL_get_float(t, byref(d)):
         return d.value
     else:
         raise InvalidTypeError("float")
 
 
-def getString(t):
+def getString(t, swipl):
     """If t is of type string, return it, otherwise raise InvalidTypeError.
     """
     slen = c_int()
     s = c_char_p()
-    if PL_get_string_chars(t, byref(s), byref(slen)):
+    if swipl.PL_get_string_chars(t, byref(s), byref(slen)):
         return s.value
     else:
         raise InvalidTypeError("string")
 
 
 mappedTerms = {}
-def getTerm(t):
+def getTerm(t, swipl):
     if t is None:
         return None
     global mappedTerms
@@ -399,40 +400,40 @@ def getTerm(t):
 
     #if t in mappedTerms:
     #    return mappedTerms[t]
-    p = PL_term_type(t)
+    p = swipl.PL_term_type(t)
     if p < PL_TERM:
-        res = _getterm_router[p](t)
-    elif PL_is_list(t):
-        res = getList(t)
+        res = _getterm_router[p](t, swipl)
+    elif swipl.PL_is_list(t):
+        res = getList(t, swipl)
     else:
-        res = getFunctor(t)
+        res = getFunctor(t, swipl)
     mappedTerms[t] = res
     return res
 
 
-def getList(x):
+def getList(x, swipl):
     """
     Return t as a list.
     """
 
-    t = PL_copy_term_ref(x)
-    head = PL_new_term_ref()
+    t = swipl.PL_copy_term_ref(x)
+    head = swipl.PL_new_term_ref()
     result = []
-    while PL_get_list(t, head, t):
-        result.append(getTerm(head))
-        head = PL_new_term_ref()
+    while swipl.PL_get_list(t, head, t):
+        result.append(getTerm(head, swipl))
+        head = swipl.PL_new_term_ref()
 
     return result
 
 
-def getFunctor(t):
+def getFunctor(t, swipl):
     """Return t as a functor
     """
-    return Functor.fromTerm(t)
+    return Functor.fromTerm(t, swipl)
 
 
-def getVariable(t):
-    return Variable(t)
+def getVariable(t, swipl):
+    return Variable(t, swipl)
 
 
 _getterm_router = {
@@ -445,6 +446,7 @@ _getterm_router = {
                   }
 
 arities = {}
+
 
 def _callbackWrapper(arity=1, nondeterministic=False):
     global arities
@@ -462,16 +464,16 @@ def _callbackWrapper(arity=1, nondeterministic=False):
 funwraps = {}
 
 
-def _foreignWrapper(fun, nondeterministic=False):
+def _foreignWrapper(fun, swipl, nondeterministic=False):
     global funwraps
 
     res = funwraps.get(fun)
     if res is None:
         def wrapper(*args):
             if nondeterministic:
-                args = [getTerm(arg) for arg in args[:-1]] + [args[-1]]
+                args = [getTerm(arg, swipl) for arg in args[:-1]] + [args[-1]]
             else:
-                args = [getTerm(arg) for arg in args]
+                args = [getTerm(arg, swipl) for arg in args]
             r = fun(*args)
             return (r is None) and True or r
 
@@ -483,7 +485,7 @@ def _foreignWrapper(fun, nondeterministic=False):
 cwraps = []
 
 
-def registerForeign(func, name=None, arity=None, flags=0):
+def registerForeign(func, swipl, name=None, arity=None, flags=0):
     """Register a Python predicate
     ``func``: Function to be registered. The function should return a value in
     ``foreign_t``, ``True`` or ``False``.
@@ -503,23 +505,23 @@ def registerForeign(func, name=None, arity=None, flags=0):
     nondeterministic = bool(flags & PL_FA_NONDETERMINISTIC)
 
     cwrap = _callbackWrapper(arity, nondeterministic)
-    fwrap = _foreignWrapper(func, nondeterministic)
+    fwrap = _foreignWrapper(func, swipl, nondeterministic)
     fwrap2 = cwrap(fwrap)
     cwraps.append(fwrap2)
-    return PL_register_foreign(name, arity, fwrap2, flags)
+    return swipl.PL_register_foreign(name, arity, fwrap2, flags)
     # return PL_register_foreign(name, arity,
     #            _callbackWrapper(arity)(_foreignWrapper(func)), flags)
 
 
-newTermRef = PL_new_term_ref
+# newTermRef = PL_new_term_ref
 
 
-def newTermRefs(count):
-    a = PL_new_term_refs(count)
+def newTermRefs(count, swipl):
+    a = swipl.PL_new_term_refs(count)
     return list(range(a, a + count))
 
 
-def call(*terms, **kwargs):
+def call(swipl, *terms, **kwargs):
     """Call term in module.
     ``term``: a Term or term handle
     """
@@ -531,26 +533,27 @@ def call(*terms, **kwargs):
 
     t = terms[0]
     for tx in terms[1:]:
-        t = _comma(t, tx)
+        t = Functor(",", swipl, 2)(t, tx)
 
-    return PL_call(t.handle, module)
+    return swipl.PL_call(t.handle, module)
 
 
-def newModule(name):
+def newModule(name, swipl):
     """Create a new module.
     ``name``: An Atom or a string
     """
     if isinstance(name, str):
-        name = Atom(name)
+        name = Atom(name, swipl)
 
-    return PL_new_module(name.handle)
+    return swipl.PL_new_module(name.handle)
 
 
 class Query(object):
     qid = None
     fid = None
 
-    def __init__(self, *terms, **kwargs):
+    def __init__(self, swipl, *terms, **kwargs):
+        self.swipl = swipl
         for key in kwargs:
             if key not in ["flags", "module"]:
                 raise Exception("Invalid kwarg: %s" % key, key)
@@ -560,25 +563,25 @@ class Query(object):
 
         t = terms[0]
         for tx in terms[1:]:
-            t = _comma(t, tx)
+            t = Functor(",", swipl, 2)(t, tx)
 
-        f = Functor.fromTerm(t)
-        p = PL_pred(f.handle, module)
-        Query.qid = PL_open_query(module, flags, p, f.a0)
+        f = Functor.fromTerm(t, swipl)
+        p = swipl.PL_pred(f.handle, module)
+        Query.qid = swipl.PL_open_query(module, flags, p, f.a0)
 
 #    def __del__(self):
 #        self.closeQuery()
 
-    def nextSolution():
-        return PL_next_solution(Query.qid)
+    def nextSolution(swipl):
+        return swipl.PL_next_solution(Query.qid)
     nextSolution = staticmethod(nextSolution)
 
-    def cutQuery():
-        PL_cut_query(Query.qid)
+    def cutQuery(swipl):
+        swipl.PL_cut_query(Query.qid)
     cutQuery = staticmethod(cutQuery)
 
-    def closeQuery():
+    def closeQuery(swipl):
         if Query.qid is not None:
-            PL_close_query(Query.qid)
+            swipl.PL_close_query(Query.qid)
             Query.qid = None
     closeQuery = staticmethod(closeQuery)
